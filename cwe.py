@@ -1,4 +1,5 @@
 from models import KnowledgeObject
+from dataclasses import asdict
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 import uuid
@@ -439,35 +440,95 @@ def process_cwe(
     return knowledge_objects
 
 
+def enqueue_cwe(
+    xml_path: str,
+    core_name: str,
+    source: str,
+    session: str,
+    batch_size: int = 100
+) -> int:
+    """
+    Process CWE data and enqueue to Redis.
+
+    Args:
+        xml_path: Path to the CWE XML file
+        core_name: Name of the core/index to store in
+        source: Source identifier
+        session: Session identifier
+        batch_size: Number of KOs per batch message
+
+    Returns:
+        Total number of KnowledgeObjects enqueued
+    """
+    from messaging import enqueue
+    from models import StoreKnowledgeBatchJob
+
+    print(f"Processing CWE data from {xml_path}...")
+    knowledge_objects = process_cwe(xml_path, source, session)
+
+    # Convert to dicts
+    ko_dicts = [asdict(ko) for ko in knowledge_objects]
+
+    # Enqueue in batches
+    num_batches = 0
+    for i in range(0, len(ko_dicts), batch_size):
+        batch = ko_dicts[i:i + batch_size]
+        job = StoreKnowledgeBatchJob(
+            knowledge_objects=batch,
+            core_name=core_name
+        )
+        enqueue("store_knowledge_batch", "store-batch", args=(job.to_dict(),))
+        num_batches += 1
+
+    print(f"Enqueued {num_batches} batches")
+    return len(ko_dicts)
+
+
 if __name__ == "__main__":
-    # Example usage
-    import os
+    import argparse
 
-    XML_PATH = os.path.join("..", "data", "cwec_v4.19.xml")
-    SOURCE = "cwe"
-    SESSION = str(uuid.uuid4())
+    parser = argparse.ArgumentParser(description="Process CWE data into KnowledgeObjects")
+    parser.add_argument("--xml-path", default="./cwec_v4.19.xml", help="Path to CWE XML file")
+    parser.add_argument("--core-name", default="cwe", help="Core name for storage")
+    parser.add_argument("--source", default="cwe", help="Source identifier")
+    parser.add_argument("--batch-size", type=int, default=200, help="Batch size for enqueueing")
+    parser.add_argument("--enqueue", action="store_true", help="Enqueue to Redis instead of just printing")
 
-    print(f"Processing CWE data from {XML_PATH}...")
+    args = parser.parse_args()
+    session = str(uuid.uuid4())
 
-    knowledge_objects = process_cwe(XML_PATH, SOURCE, SESSION)
+    if args.enqueue:
+        # Enqueue to Redis
+        total = enqueue_cwe(
+            xml_path=args.xml_path,
+            core_name=args.core_name,
+            source=args.source,
+            session=session,
+            batch_size=args.batch_size
+        )
+        print(f"\nEnqueued {total} KnowledgeObjects in batches of {args.batch_size}")
+    else:
+        # Just process and print stats
+        print(f"Processing CWE data from {args.xml_path}...")
+        knowledge_objects = process_cwe(args.xml_path, args.source, session)
 
-    print(f"\nTotal KnowledgeObjects created: {len(knowledge_objects)}")
+        print(f"\nTotal KnowledgeObjects created: {len(knowledge_objects)}")
 
-    # Count by type
-    weaknesses = [ko for ko in knowledge_objects if "Weakness" in ko.text[:100]]
-    categories = [ko for ko in knowledge_objects if "Category" in ko.text[:100]]
-    print(f"  Weaknesses: {len(weaknesses)}")
-    print(f"  Categories: {len(categories)}")
+        # Count by type
+        weaknesses = [ko for ko in knowledge_objects if "Weakness" in ko.text[:100]]
+        categories = [ko for ko in knowledge_objects if "Category" in ko.text[:100]]
+        print(f"  Weaknesses: {len(weaknesses)}")
+        print(f"  Categories: {len(categories)}")
 
-    # Print a sample
-    if knowledge_objects:
-        sample = knowledge_objects[0]
-        print(f"\nSample KnowledgeObject:")
-        print(f"  ID: {sample.id}")
-        print(f"  Text preview: {sample.text[:300]}...")
-        print(f"  Entities: {len(sample.entities)}")
-        for ent in sample.entities[:5]:
-            print(f"    - {ent['name']} ({ent['type']}, {ent['role']})")
-        print(f"  Predicates: {len(sample.predicates)}")
-        for pred in sample.predicates:
-            print(f"    - {pred['name']} ({pred['predicate_type']})")
+        # Print a sample
+        if knowledge_objects:
+            sample = knowledge_objects[0]
+            print(f"\nSample KnowledgeObject:")
+            print(f"  ID: {sample.id}")
+            print(f"  Text preview: {sample.text[:300]}...")
+            print(f"  Entities: {len(sample.entities)}")
+            for ent in sample.entities[:5]:
+                print(f"    - {ent['name']} ({ent['type']}, {ent['role']})")
+            print(f"  Predicates: {len(sample.predicates)}")
+            for pred in sample.predicates:
+                print(f"    - {pred['name']} ({pred['predicate_type']})")
