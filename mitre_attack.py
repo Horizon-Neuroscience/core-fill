@@ -1,5 +1,6 @@
 from models import KnowledgeObject
 from stix2 import FileSystemSource, Filter
+from dataclasses import asdict
 from datetime import datetime, timezone
 import json
 import os
@@ -411,23 +412,88 @@ def process_all_domains(
     return results
 
 
+def enqueue_all_domains(
+    cti_path: str,
+    core_name: str,
+    source: str,
+    session: str,
+    batch_size: int = 100
+) -> int:
+    """
+    Process all ATT&CK domains and CAPEC, then enqueue to Redis.
+
+    Args:
+        cti_path: Path to the CTI repository
+        core_name: Name of the core/index to store in
+        source: Source identifier
+        session: Session identifier
+        batch_size: Number of KOs per batch message
+
+    Returns:
+        Total number of KnowledgeObjects enqueued
+    """
+    from messaging import enqueue
+    from models import StoreKnowledgeBatchJob
+
+    all_kos = process_all_domains(cti_path, source, session)
+
+    # Flatten all KOs and convert to dicts
+    all_ko_dicts = []
+    for kos in all_kos.values():
+        for ko in kos:
+            all_ko_dicts.append(asdict(ko))
+
+    # Enqueue in batches
+    num_batches = 0
+    for i in range(0, len(all_ko_dicts), batch_size):
+        batch = all_ko_dicts[i:i + batch_size]
+        job = StoreKnowledgeBatchJob(
+            knowledge_objects=batch,
+            core_name=core_name
+        )
+        enqueue("store_knowledge_batch", "store-batch", args=(job.to_dict(),))
+        num_batches += 1
+
+    print(f"Enqueued {num_batches} batches")
+    return len(all_ko_dicts)
+
+
 if __name__ == "__main__":
-    # Example usage
-    CTI_PATH = "./cti"
-    SOURCE = "mitre-attack"
-    SESSION = str(uuid.uuid4())
+    import argparse
 
-    all_kos = process_all_domains(CTI_PATH, SOURCE, SESSION)
+    parser = argparse.ArgumentParser(description="Process MITRE ATT&CK data into KnowledgeObjects")
+    parser.add_argument("--cti-path", default="./cti", help="Path to CTI repository")
+    parser.add_argument("--core-name", default="organic-chem", help="Core name for storage")
+    parser.add_argument("--source", default="mitre-attack", help="Source identifier")
+    parser.add_argument("--batch-size", type=int, default=200, help="Batch size for enqueueing")
+    parser.add_argument("--enqueue", action="store_true", help="Enqueue to Redis instead of just printing")
 
-    total = sum(len(kos) for kos in all_kos.values())
-    print(f"\nTotal KnowledgeObjects created: {total}")
+    args = parser.parse_args()
+    session = str(uuid.uuid4())
 
-    # Print a sample
-    if all_kos.get("enterprise-attack"):
-        sample = all_kos["enterprise-attack"][0]
-        print(f"\nSample KnowledgeObject:")
-        print(f"  ID: {sample.id}")
-        print(f"  Text preview: {sample.text[:200]}...")
-        print(f"  Entities: {len(sample.entities)}")
-        for ent in sample.entities[:3]:
-            print(f"    - {ent['name']} ({ent['entity_type']}, {ent['role']})")
+    if args.enqueue:
+        # Enqueue to Redis
+        total = enqueue_all_domains(
+            cti_path=args.cti_path,
+            core_name=args.core_name,
+            source=args.source,
+            session=session,
+            batch_size=args.batch_size
+        )
+        print(f"\nEnqueued {total} KnowledgeObjects in batches of {args.batch_size}")
+    else:
+        # Just process and print stats
+        all_kos = process_all_domains(args.cti_path, args.source, session)
+
+        total = sum(len(kos) for kos in all_kos.values())
+        print(f"\nTotal KnowledgeObjects created: {total}")
+
+        # Print a sample
+        if all_kos.get("enterprise-attack"):
+            sample = all_kos["enterprise-attack"][0]
+            print(f"\nSample KnowledgeObject:")
+            print(f"  ID: {sample.id}")
+            print(f"  Text preview: {sample.text[:200]}...")
+            print(f"  Entities: {len(sample.entities)}")
+            for ent in sample.entities[:3]:
+                print(f"    - {ent['name']} ({ent['entity_type']}, {ent['role']})")
