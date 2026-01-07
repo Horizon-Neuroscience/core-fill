@@ -169,3 +169,15 @@ class StoreKnowledgeBatchJob:
     def to_dict(self) -> dict:
         return asdict(self)
 
+
+@dataclass
+class ExtractAndStoreBatchJob:
+    """Job payload for extract_and_store_batch actor."""
+    text_items: List[Dict[str, Any]]  # Each: {"text": str, "manual_entities": Optional[List[Dict]]}
+    core_name: str
+    source: str
+    session: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+

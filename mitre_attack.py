@@ -1,7 +1,4 @@
-from models import KnowledgeObject
 from stix2 import FileSystemSource, Filter
-from dataclasses import asdict
-from datetime import datetime, timezone
 import json
 import os
 import uuid
@@ -75,30 +72,23 @@ def create_entity(
     name: str,
     entity_type: str,
     role: str,
-    start: int,
-    end: int
 ) -> Dict[str, Any]:
-    """Create an entity dict for a KnowledgeObject."""
+    """Create a manual entity dict for extraction."""
     return {
-        "id": str(uuid.uuid4()),
         "name": name,
-        "entity_type": entity_type,
+        "type": entity_type,
         "role": role,
-        "start": start,
-        "end": end,
     }
 
 
 def build_text_with_entities(stix_obj: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
     """
-    Build the text content for a KnowledgeObject with inline identifiers,
-    and extract entities with their positions.
+    Build the text content with inline identifiers and extract manual entities.
 
     Returns: (text, entities)
     """
     entities = []
     text_parts = []
-    current_pos = 0
 
     stix_type = stix_obj.get("type", "")
     name = stix_obj.get("name", "Unknown")
@@ -113,25 +103,15 @@ def build_text_with_entities(stix_obj: Dict[str, Any]) -> tuple[str, List[Dict[s
     # Format: "[T1055.011] Extra Window Memory Injection (Technique)"
     if attack_id:
         header = f"[{attack_id}] {name} ({type_label})"
-        # Entity for ATT&CK ID
-        id_start = 1  # After '['
-        id_end = id_start + len(attack_id)
         entities.append(create_entity(
             name=attack_id,
             entity_type="attack_id",
             role="identifier",
-            start=id_start,
-            end=id_end
         ))
-        # Entity for name
-        name_start = id_end + 2  # After '] '
-        name_end = name_start + len(name)
         entities.append(create_entity(
             name=name,
             entity_type=stix_type,
             role="name",
-            start=name_start,
-            end=name_end
         ))
     else:
         header = f"{name} ({type_label})"
@@ -139,57 +119,35 @@ def build_text_with_entities(stix_obj: Dict[str, Any]) -> tuple[str, List[Dict[s
             name=name,
             entity_type=stix_type,
             role="name",
-            start=0,
-            end=len(name)
         ))
 
     text_parts.append(header)
-    current_pos = len(header)
 
     # Add tactics if present
     if tactics:
         text_parts.append("\n\nTactics: ")
-        current_pos += len("\n\nTactics: ")
-        tactic_strs = []
+        text_parts.append(", ".join(tactics))
         for tactic in tactics:
-            tactic_start = current_pos + len(", ".join(tactic_strs))
-            if tactic_strs:
-                tactic_start += 2  # ", "
             entities.append(create_entity(
                 name=tactic,
                 entity_type="tactic",
                 role="tactic",
-                start=tactic_start,
-                end=tactic_start + len(tactic)
             ))
-            tactic_strs.append(tactic)
-        text_parts.append(", ".join(tactic_strs))
-        current_pos += len(", ".join(tactic_strs))
 
     # Add platforms if present
     if platforms:
         text_parts.append("\nPlatforms: ")
-        current_pos += len("\nPlatforms: ")
-        platform_strs = []
+        text_parts.append(", ".join(platforms))
         for platform in platforms:
-            platform_start = current_pos + len(", ".join(platform_strs))
-            if platform_strs:
-                platform_start += 2
             entities.append(create_entity(
                 name=platform,
                 entity_type="platform",
                 role="platform",
-                start=platform_start,
-                end=platform_start + len(platform)
             ))
-            platform_strs.append(platform)
-        text_parts.append(", ".join(platform_strs))
-        current_pos += len(", ".join(platform_strs))
 
     # Add URL if present
     if attack_url:
         text_parts.append(f"\nURL: {attack_url}")
-        current_pos += len(f"\nURL: {attack_url}")
 
     # Add description
     if description:
@@ -198,12 +156,8 @@ def build_text_with_entities(stix_obj: Dict[str, Any]) -> tuple[str, List[Dict[s
     return "".join(text_parts), entities
 
 
-def stix_to_knowledge_object(
-    stix_obj: Dict[str, Any],
-    source: str,
-    session: str
-) -> Optional[KnowledgeObject]:
-    """Convert a STIX object to a KnowledgeObject."""
+def stix_to_text_item(stix_obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Convert a STIX object to a text item with manual entities."""
     # Skip deprecated objects
     if stix_obj.get("x_mitre_deprecated", False):
         return None
@@ -212,34 +166,12 @@ def stix_to_knowledge_object(
     if stix_obj.get("revoked", False):
         return None
 
-    # Generate a new KO ID (not using STIX ID)
-    ko_id = f"ko_{uuid.uuid4().hex[:12]}"
-
     text, entities = build_text_with_entities(stix_obj)
 
-    # Build predicates from relationships (if any embedded)
-    predicates = []
-
-    # Add is_subtechnique predicate if applicable
-    if stix_obj.get("x_mitre_is_subtechnique"):
-        predicates.append({
-            "id": str(uuid.uuid4()),
-            "name": "is_subtechnique_of",
-            "predicate_type": "hierarchy",
-            "primary": True,
-        })
-
-    created_at = stix_obj.get("created", datetime.now(timezone.utc).isoformat())
-
-    return KnowledgeObject(
-        id=ko_id,
-        text=text,
-        entities=entities,
-        predicates=predicates,
-        source=source,
-        session=session,
-        created_at=created_at
-    )
+    return {
+        "text": text,
+        "manual_entities": entities if entities else None
+    }
 
 
 def load_attack_data(cti_path: str, domain: str = "enterprise-attack") -> Generator[Dict[str, Any], None, None]:
@@ -283,29 +215,25 @@ def load_attack_data(cti_path: str, domain: str = "enterprise-attack") -> Genera
 def process_attack_domain(
     cti_path: str,
     domain: str,
-    source: str,
-    session: str
-) -> List[KnowledgeObject]:
+) -> List[Dict[str, Any]]:
     """
-    Process all ATT&CK objects from a domain into KnowledgeObjects.
+    Process all ATT&CK objects from a domain into text items.
 
     Args:
         cti_path: Path to the CTI repository
         domain: ATT&CK domain name
-        source: Source identifier for KnowledgeObjects
-        session: Session identifier for KnowledgeObjects
 
     Returns:
-        List of KnowledgeObjects
+        List of text items ({"text": str, "manual_entities": List[Dict]})
     """
-    knowledge_objects = []
+    text_items = []
 
     for stix_obj in load_attack_data(cti_path, domain):
-        ko = stix_to_knowledge_object(stix_obj, source, session)
-        if ko:
-            knowledge_objects.append(ko)
+        item = stix_to_text_item(stix_obj)
+        if item:
+            text_items.append(item)
 
-    return knowledge_objects
+    return text_items
 
 
 def load_capec_data(cti_path: str, version: str = "2.1") -> Generator[Dict[str, Any], None, None]:
@@ -349,47 +277,39 @@ def load_capec_data(cti_path: str, version: str = "2.1") -> Generator[Dict[str, 
 
 def process_capec(
     cti_path: str,
-    source: str,
-    session: str,
     version: str = "2.1"
-) -> List[KnowledgeObject]:
+) -> List[Dict[str, Any]]:
     """
-    Process CAPEC data into KnowledgeObjects.
+    Process CAPEC data into text items.
 
     Args:
         cti_path: Path to the CTI repository
-        source: Source identifier
-        session: Session identifier
         version: CAPEC STIX version
 
     Returns:
-        List of KnowledgeObjects
+        List of text items ({"text": str, "manual_entities": List[Dict]})
     """
-    knowledge_objects = []
+    text_items = []
 
     for stix_obj in load_capec_data(cti_path, version):
-        ko = stix_to_knowledge_object(stix_obj, source, session)
-        if ko:
-            knowledge_objects.append(ko)
+        item = stix_to_text_item(stix_obj)
+        if item:
+            text_items.append(item)
 
-    return knowledge_objects
+    return text_items
 
 
 def process_all_domains(
     cti_path: str,
-    source: str,
-    session: str
-) -> Dict[str, List[KnowledgeObject]]:
+) -> Dict[str, List[Dict[str, Any]]]:
     """
     Process all ATT&CK domains and CAPEC from the CTI repository.
 
     Args:
         cti_path: Path to the CTI repository
-        source: Source identifier
-        session: Session identifier
 
     Returns:
-        Dict mapping domain names to lists of KnowledgeObjects
+        Dict mapping domain names to lists of text items
     """
     # ATT&CK domains including pre-attack
     domains = ["enterprise-attack", "mobile-attack", "ics-attack", "pre-attack"]
@@ -399,14 +319,14 @@ def process_all_domains(
         domain_path = os.path.join(cti_path, domain)
         if os.path.exists(domain_path):
             print(f"Processing {domain}...")
-            results[domain] = process_attack_domain(cti_path, domain, source, session)
+            results[domain] = process_attack_domain(cti_path, domain)
             print(f"  Found {len(results[domain])} objects")
 
     # Process CAPEC separately (different folder structure)
     capec_path = os.path.join(cti_path, "capec")
     if os.path.exists(capec_path):
         print("Processing capec...")
-        results["capec"] = process_capec(cti_path, source, session)
+        results["capec"] = process_capec(cti_path)
         print(f"  Found {len(results['capec'])} objects")
 
     return results
@@ -427,41 +347,42 @@ def enqueue_all_domains(
         core_name: Name of the core/index to store in
         source: Source identifier
         session: Session identifier
-        batch_size: Number of KOs per batch message
+        batch_size: Number of text items per batch message
 
     Returns:
-        Total number of KnowledgeObjects enqueued
+        Total number of text items enqueued
     """
     from messaging import enqueue
-    from models import StoreKnowledgeBatchJob
+    from models import ExtractAndStoreBatchJob
 
-    all_kos = process_all_domains(cti_path, source, session)
+    all_items = process_all_domains(cti_path)
 
-    # Flatten all KOs and convert to dicts
-    all_ko_dicts = []
-    for kos in all_kos.values():
-        for ko in kos:
-            all_ko_dicts.append(asdict(ko))
+    # Flatten all text items
+    all_text_items = []
+    for items in all_items.values():
+        all_text_items.extend(items)
 
     # Enqueue in batches
     num_batches = 0
-    for i in range(0, len(all_ko_dicts), batch_size):
-        batch = all_ko_dicts[i:i + batch_size]
-        job = StoreKnowledgeBatchJob(
-            knowledge_objects=batch,
-            core_name=core_name
+    for i in range(0, len(all_text_items), batch_size):
+        batch = all_text_items[i:i + batch_size]
+        job = ExtractAndStoreBatchJob(
+            text_items=batch,
+            core_name=core_name,
+            source=source,
+            session=session
         )
-        enqueue("store_knowledge_batch", "store-batch", args=(job.to_dict(),))
+        enqueue("extract_and_store_batch", "extract-store-batch", args=(job.to_dict(),))
         num_batches += 1
 
     print(f"Enqueued {num_batches} batches")
-    return len(all_ko_dicts)
+    return len(all_text_items)
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Process MITRE ATT&CK data into KnowledgeObjects")
+    parser = argparse.ArgumentParser(description="Process MITRE ATT&CK data into text items")
     parser.add_argument("--cti-path", default="./cti", help="Path to CTI repository")
     parser.add_argument("--core-name", default="organic-chem", help="Core name for storage")
     parser.add_argument("--source", default="mitre-attack", help="Source identifier")
@@ -480,20 +401,20 @@ if __name__ == "__main__":
             session=session,
             batch_size=args.batch_size
         )
-        print(f"\nEnqueued {total} KnowledgeObjects in batches of {args.batch_size}")
+        print(f"\nEnqueued {total} text items in batches of {args.batch_size}")
     else:
         # Just process and print stats
-        all_kos = process_all_domains(args.cti_path, args.source, session)
+        all_items = process_all_domains(args.cti_path)
 
-        total = sum(len(kos) for kos in all_kos.values())
-        print(f"\nTotal KnowledgeObjects created: {total}")
+        total = sum(len(items) for items in all_items.values())
+        print(f"\nTotal text items created: {total}")
 
         # Print a sample
-        if all_kos.get("enterprise-attack"):
-            sample = all_kos["enterprise-attack"][0]
-            print(f"\nSample KnowledgeObject:")
-            print(f"  ID: {sample.id}")
-            print(f"  Text preview: {sample.text[:200]}...")
-            print(f"  Entities: {len(sample.entities)}")
-            for ent in sample.entities[:3]:
-                print(f"    - {ent['name']} ({ent['entity_type']}, {ent['role']})")
+        if all_items.get("enterprise-attack"):
+            sample = all_items["enterprise-attack"][0]
+            print(f"\nSample text item:")
+            print(f"  Text preview: {sample['text'][:200]}...")
+            entities = sample.get("manual_entities") or []
+            print(f"  Entities: {len(entities)}")
+            for ent in entities[:3]:
+                print(f"    - {ent['name']} ({ent['type']}, {ent['role']})")

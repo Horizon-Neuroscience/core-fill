@@ -1,6 +1,3 @@
-from models import KnowledgeObject
-from dataclasses import asdict
-from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 import uuid
 from typing import List, Dict, Any, Optional, Generator
@@ -170,35 +167,27 @@ def create_entity(
     name: str,
     entity_type: str,
     role: str,
-    start: int,
-    end: int
 ) -> Dict[str, Any]:
-    """Create an entity dict for a KnowledgeObject."""
+    """Create a manual entity dict for extraction."""
     return {
-        "id": str(uuid.uuid4()),
         "name": name,
         "type": entity_type,
         "role": role,
-        "start": start,
-        "end": end,
     }
 
 
 def build_text_with_entities(element: ET.Element, obj_type: str) -> tuple[str, List[Dict[str, Any]]]:
     """
-    Build the text content for a KnowledgeObject with inline identifiers,
-    and extract entities with their positions.
+    Build the text content with inline identifiers and extract manual entities.
 
     Returns: (text, entities)
     """
     entities = []
     text_parts = []
-    current_pos = 0
 
     cwe_id = get_cwe_id(element)
     name = get_name(element)
     abstraction = get_abstraction(element)
-    status = get_status(element)
     cwe_url = get_cwe_url(element)
     platforms = get_platforms(element)
     consequences = get_consequences(element)
@@ -220,116 +209,75 @@ def build_text_with_entities(element: ET.Element, obj_type: str) -> tuple[str, L
         header = f"[{cwe_id}] {name} ({obj_type})"
 
     # Entity for CWE ID
-    id_start = 1  # After '['
-    id_end = id_start + len(cwe_id)
     entities.append(create_entity(
         name=cwe_id,
         entity_type="cwe_id",
         role="identifier",
-        start=id_start,
-        end=id_end
     ))
 
     # Entity for name
-    name_start = id_end + 2  # After '] '
-    name_end = name_start + len(name)
     entities.append(create_entity(
         name=name,
         entity_type=obj_type.lower(),
         role="name",
-        start=name_start,
-        end=name_end
     ))
 
     # Entity for abstraction level
     if abstraction:
-        # Position is after "({obj_type} - "
-        abstraction_start = name_end + len(f" ({obj_type} - ")
-        abstraction_end = abstraction_start + len(abstraction)
         entities.append(create_entity(
             name=abstraction,
             entity_type="abstraction",
             role="level",
-            start=abstraction_start,
-            end=abstraction_end
         ))
 
     text_parts.append(header)
-    current_pos = len(header)
 
     # Add platforms if present
     if platforms:
         text_parts.append("\n\nPlatforms: ")
-        current_pos += len("\n\nPlatforms: ")
-        platform_strs = []
+        text_parts.append(", ".join(platforms))
         for platform in platforms:
-            platform_start = current_pos + len(", ".join(platform_strs))
-            if platform_strs:
-                platform_start += 2  # ", "
             entities.append(create_entity(
                 name=platform,
                 entity_type="platform",
                 role="platform",
-                start=platform_start,
-                end=platform_start + len(platform)
             ))
-            platform_strs.append(platform)
-        text_parts.append(", ".join(platform_strs))
-        current_pos += len(", ".join(platform_strs))
 
     # Add consequences if present
     if consequences:
         text_parts.append("\n\nConsequences:")
-        current_pos += len("\n\nConsequences:")
         for cons in consequences:
             scope = cons.get("scope", "")
             impact = cons.get("impact", "")
             if scope and impact:
-                line = f"\n- {scope}: {impact}"
-                text_parts.append(line)
-                # Entity for scope
-                scope_start = current_pos + 3  # After "\n- "
+                text_parts.append(f"\n- {scope}: {impact}")
                 entities.append(create_entity(
                     name=scope,
                     entity_type="impact_scope",
                     role="consequence",
-                    start=scope_start,
-                    end=scope_start + len(scope)
                 ))
-                # Entity for impact
-                impact_start = scope_start + len(scope) + 2  # After ": "
                 entities.append(create_entity(
                     name=impact,
                     entity_type="impact",
                     role="consequence",
-                    start=impact_start,
-                    end=impact_start + len(impact)
                 ))
-                current_pos += len(line)
 
     # Add observed CVE examples (limit to first 5)
     if observed_examples:
         text_parts.append("\n\nObserved Examples:")
-        current_pos += len("\n\nObserved Examples:")
         for ex in observed_examples[:5]:
             cve = ex.get("cve", "")
             if cve:
-                line = f"\n- {cve}"
-                text_parts.append(line)
-                cve_start = current_pos + 3  # After "\n- "
+                text_parts.append(f"\n- {cve}")
                 entities.append(create_entity(
                     name=cve,
                     entity_type="cve",
                     role="example",
-                    start=cve_start,
-                    end=cve_start + len(cve)
                 ))
-                current_pos += len(line)
 
     # Add URL
     if cwe_url:
         text_parts.append(f"\n\nURL: {cwe_url}")
-        current_pos += len(f"\n\nURL: {cwe_url}")
 
     # Add description
     if description:
@@ -338,53 +286,22 @@ def build_text_with_entities(element: ET.Element, obj_type: str) -> tuple[str, L
     return "".join(text_parts), entities
 
 
-def cwe_to_knowledge_object(
+def cwe_to_text_item(
     element: ET.Element,
     obj_type: str,
-    source: str,
-    session: str
-) -> Optional[KnowledgeObject]:
-    """Convert a CWE XML element to a KnowledgeObject."""
+) -> Optional[Dict[str, Any]]:
+    """Convert a CWE XML element to a text item with manual entities."""
     # Skip deprecated/obsolete objects
     status = get_status(element)
     if status in ("Deprecated", "Obsolete"):
         return None
 
-    # Generate a new KO ID
-    ko_id = f"ko_{uuid.uuid4().hex[:12]}"
-
     text, entities = build_text_with_entities(element, obj_type)
 
-    # Build predicates from relationships
-    predicates = []
-    related = get_related_weaknesses(element)
-
-    # Check for parent relationship (ChildOf)
-    has_parent = any(r["nature"] == "ChildOf" for r in related)
-    if has_parent:
-        predicates.append({
-            "id": str(uuid.uuid4()),
-            "name": "child_of",
-            "predicate_type": "hierarchy",
-            "primary": True,
-        })
-
-    # Get creation date
-    submission_date = get_submission_date(element)
-    if submission_date:
-        created_at = submission_date
-    else:
-        created_at = datetime.now(timezone.utc).isoformat()
-
-    return KnowledgeObject(
-        id=ko_id,
-        text=text,
-        entities=entities,
-        predicates=predicates,
-        source=source,
-        session=session,
-        created_at=created_at
-    )
+    return {
+        "text": text,
+        "manual_entities": entities if entities else None
+    }
 
 
 def load_cwe_data(xml_path: str) -> Generator[tuple[ET.Element, str], None, None]:
@@ -416,28 +333,24 @@ def load_cwe_data(xml_path: str) -> Generator[tuple[ET.Element, str], None, None
 
 def process_cwe(
     xml_path: str,
-    source: str,
-    session: str
-) -> List[KnowledgeObject]:
+) -> List[Dict[str, Any]]:
     """
-    Process CWE XML file into KnowledgeObjects.
+    Process CWE XML file into text items.
 
     Args:
         xml_path: Path to the CWE XML file
-        source: Source identifier for KnowledgeObjects
-        session: Session identifier for KnowledgeObjects
 
     Returns:
-        List of KnowledgeObjects
+        List of text items ({"text": str, "manual_entities": List[Dict]})
     """
-    knowledge_objects = []
+    text_items = []
 
     for element, obj_type in load_cwe_data(xml_path):
-        ko = cwe_to_knowledge_object(element, obj_type, source, session)
-        if ko:
-            knowledge_objects.append(ko)
+        item = cwe_to_text_item(element, obj_type)
+        if item:
+            text_items.append(item)
 
-    return knowledge_objects
+    return text_items
 
 
 def enqueue_cwe(
@@ -455,39 +368,38 @@ def enqueue_cwe(
         core_name: Name of the core/index to store in
         source: Source identifier
         session: Session identifier
-        batch_size: Number of KOs per batch message
+        batch_size: Number of text items per batch message
 
     Returns:
-        Total number of KnowledgeObjects enqueued
+        Total number of text items enqueued
     """
     from messaging import enqueue
-    from models import StoreKnowledgeBatchJob
+    from models import ExtractAndStoreBatchJob
 
     print(f"Processing CWE data from {xml_path}...")
-    knowledge_objects = process_cwe(xml_path, source, session)
-
-    # Convert to dicts
-    ko_dicts = [asdict(ko) for ko in knowledge_objects]
+    text_items = process_cwe(xml_path)
 
     # Enqueue in batches
     num_batches = 0
-    for i in range(0, len(ko_dicts), batch_size):
-        batch = ko_dicts[i:i + batch_size]
-        job = StoreKnowledgeBatchJob(
-            knowledge_objects=batch,
-            core_name=core_name
+    for i in range(0, len(text_items), batch_size):
+        batch = text_items[i:i + batch_size]
+        job = ExtractAndStoreBatchJob(
+            text_items=batch,
+            core_name=core_name,
+            source=source,
+            session=session
         )
-        enqueue("store_knowledge_batch", "store-batch", args=(job.to_dict(),))
+        enqueue("extract_and_store_batch", "extract-store-batch", args=(job.to_dict(),))
         num_batches += 1
 
     print(f"Enqueued {num_batches} batches")
-    return len(ko_dicts)
+    return len(text_items)
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Process CWE data into KnowledgeObjects")
+    parser = argparse.ArgumentParser(description="Process CWE data into text items")
     parser.add_argument("--xml-path", default="./cwec_v4.19.xml", help="Path to CWE XML file")
     parser.add_argument("--core-name", default="cwe", help="Core name for storage")
     parser.add_argument("--source", default="cwe", help="Source identifier")
@@ -506,29 +418,26 @@ if __name__ == "__main__":
             session=session,
             batch_size=args.batch_size
         )
-        print(f"\nEnqueued {total} KnowledgeObjects in batches of {args.batch_size}")
+        print(f"\nEnqueued {total} text items in batches of {args.batch_size}")
     else:
         # Just process and print stats
         print(f"Processing CWE data from {args.xml_path}...")
-        knowledge_objects = process_cwe(args.xml_path, args.source, session)
+        text_items = process_cwe(args.xml_path)
 
-        print(f"\nTotal KnowledgeObjects created: {len(knowledge_objects)}")
+        print(f"\nTotal text items created: {len(text_items)}")
 
         # Count by type
-        weaknesses = [ko for ko in knowledge_objects if "Weakness" in ko.text[:100]]
-        categories = [ko for ko in knowledge_objects if "Category" in ko.text[:100]]
+        weaknesses = [item for item in text_items if "Weakness" in item["text"][:100]]
+        categories = [item for item in text_items if "Category" in item["text"][:100]]
         print(f"  Weaknesses: {len(weaknesses)}")
         print(f"  Categories: {len(categories)}")
 
         # Print a sample
-        if knowledge_objects:
-            sample = knowledge_objects[0]
-            print(f"\nSample KnowledgeObject:")
-            print(f"  ID: {sample.id}")
-            print(f"  Text preview: {sample.text[:300]}...")
-            print(f"  Entities: {len(sample.entities)}")
-            for ent in sample.entities[:5]:
+        if text_items:
+            sample = text_items[0]
+            print(f"\nSample text item:")
+            print(f"  Text preview: {sample['text'][:300]}...")
+            entities = sample.get("manual_entities") or []
+            print(f"  Entities: {len(entities)}")
+            for ent in entities[:5]:
                 print(f"    - {ent['name']} ({ent['type']}, {ent['role']})")
-            print(f"  Predicates: {len(sample.predicates)}")
-            for pred in sample.predicates:
-                print(f"    - {pred['name']} ({pred['predicate_type']})")
